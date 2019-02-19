@@ -13,6 +13,10 @@ memory_profiler = "^0.55.0"
 
 [tool.poetry.dev-dependencies]
 
+[tool.black]
+line-length = 79
+py36 = true
+
 [tool.poetry.scripts]
 watchmem = "toolbox.watchmem:main"
 
