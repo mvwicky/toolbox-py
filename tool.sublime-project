@@ -1,17 +1,10 @@
 {
-	"build_systems":
-	[
-		{
-			"file_regex": "^[ ]*File \"(...*?)\", line ([0-9]*)",
-			"name": "Anaconda Python Builder",
-			"selector": "source.python",
-			"shell_cmd": "\"C:\\Users\\mvanwickle\\Miniconda3\\python.exe\" -u \"$file\""
-		}
-	],
-	"folders":
-	[
+	"folders": [
 		{
 			"path": "."
 		}
-	]
+	],
+	"settings": {
+		"python_interpreter": "~/.pyenv/versions/toolbox-py-eyn3ec1d-py3.7/bin/python"
+	}
 }

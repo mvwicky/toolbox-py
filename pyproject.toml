@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "toolbox"
+version = "0.1.0"
+description = "Utilities package"
+authors = ["Michael Van Wickle <mvanwickle@gmail.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.7"
+requests = "^2.21"
+click = "^7.0"
+memory_profiler = "^0.55.0"
+
+[tool.poetry.dev-dependencies]
+
+[tool.poetry.scripts]
+watchmem = "toolbox.watchmem:main"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"
