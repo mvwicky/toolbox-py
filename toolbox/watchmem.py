@@ -1,5 +1,5 @@
-import time
 import math
+import time
 from dataclasses import dataclass
 from numbers import Real
 from typing import TextIO, Text, Tuple, List
@@ -17,9 +17,7 @@ class WatchedProcess:
 
 
 def writeline(stream: TextIO, msg: Text, *, flush: bool = True):
-    stream.write(msg + "\n")
-    if flush:
-        stream.flush()
+    click.secho(msg, file=stream)
 
 
 def summarize(elapsed: Real, states: List[WatchedProcess]):
@@ -80,6 +78,49 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
 
     states = [WatchedProcess(p) for p in processes]
 
+    def writerow(
+        state: WatchedProcess,
+        start_time: float,
+        current_time: float,
+        delta: float,
+    ):
+        _fmtparts = row.split()
+        fmtparts = list()
+        while _fmtparts:
+            part = _fmtparts.pop(0)
+            if part.count("{") and part.count("}"):
+                fmtparts.append(part)
+                continue
+            if part.count("{") and not part.count("}"):
+                rpart = _fmtparts.pop(0)
+                fmtparts.append(" ".join([part, rpart]))
+
+        values = [
+            state.pid,
+            current_time,
+            current_time - start_time,
+            state.last,
+            delta,
+            state.total,
+        ]
+        colors = [
+            "cyan",
+            "white",
+            "white",
+            "blue",
+            ("red" if delta > 0 else "green"),
+            ("red" if state.total > 0 else "green"),
+        ]
+        if len(values) != len(fmtparts) != len(colors):
+            return
+        line = list()
+        for i, elem in enumerate(zip(fmtparts, values, colors)):
+            fmt, value, col = elem
+            pad = [None for _ in range(i)] + [value]
+            fmtval = click.style(fmt.format(*pad), fg=col)
+            line.append(fmtval)
+        writeline(log_file, " ".join(line))
+
     def sample(state: WatchedProcess, start_time: float):
         mem, ts = mp.memory_usage(proc=state.pid, timestamps=True)[0]
         delta = 0 if state.first else mem - state.last
@@ -89,15 +130,8 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
         state.total += delta
         state.last = mem
         current_time = time.time()
-        msg = row.format(
-            state.pid,
-            current_time,
-            current_time - start_time,
-            mem,
-            delta,
-            state.total,
-        )
-        writeline(log_file, msg)
+
+        writerow(state, start_time, current_time, delta)
 
     start = time.time()
     while True:
