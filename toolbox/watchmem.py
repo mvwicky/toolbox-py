@@ -1,31 +1,58 @@
+import csv
 import math
 import time
+import sys
+from collections import deque
 from dataclasses import dataclass
 from numbers import Real
 from typing import TextIO, Text, Tuple, List
 
 import click
-import memory_profiler as mp
+import psutil as ps
+
+
+STD_FD = (sys.stdout.fileno(), sys.stderr.fileno())
+
+
+def is_stream_std(stream: TextIO):
+    return stream.fileno() in STD_FD
+
+
+@dataclass
+class WatchedResource:
+    first: bool = True
+    total: float = 0
+    last: float = 0
 
 
 @dataclass
 class WatchedProcess:
-    pid: int
-    first: bool = True
-    total: float = 0
-    last: float = 0
+    process: ps.Process
+    mem: WatchedResource = WatchedResource()
+
+    @property
+    def pid(self):
+        return self.process.pid
+
+    @classmethod
+    def create(cls, pid):
+        return cls(ps.Process(pid))
 
 
 def writeline(stream: TextIO, msg: Text, *, flush: bool = True):
     click.secho(msg, file=stream)
 
 
+def write_csv_row(writer: csv.writer, parts):
+    writer.writerow(parts)
+
+
 def summarize(elapsed: Real, states: List[WatchedProcess]):
     for state in states:
-        m = state.total / elapsed
+        m = state.mem.total / elapsed
         click.echo(f"PID:                 {state.pid}", err=True)
         click.echo(f"Elapsed:             {elapsed:.4f}", err=True)
-        click.echo(f"Total Memory Growth: {state.total:.4f}", err=True)
+        click.echo(f"Total Memory Growth: {state.mem.total:.4f}", err=True)
         click.echo(f"Average Rate:        {m:.4f}", err=True)
 
 
@@ -66,17 +93,33 @@ def watch_options(f):
 @watch_options
 def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
     """Check the memory usage of processes."""
-    row = "{0:>6} {1:>13.2f} {2:>10.1f}s {3:> 8.2f} {4:> 8.2f} {5:> 8.2f}"
+    parts = [
+        "{{0:>{0}}}",
+        "{{1:>{1}}}",
+        "{{2:>{2}.1f}}s",
+        "{{3:> {3}.2f}}",
+        "{{4:> {4}.2f}}",
+        "{{5:> {5}.2f}}",
+    ]
+    widths = [6, 10, 10, 10, 10, 10]
+    fmt = " ".join(parts)
+    row = fmt.format(*widths)
+    # row = "{0:>6} {1:>13.2f} {2:>10.1f}s {3:> 8.2f} {4:> 8.2f} {5:> 8.2f}"
 
-    hdrfmt = "{0:>6} {1:>13} {2:>11} {3:>8} {4:>8} {5:>8}"
+    hdrfmt = "{0:>6} {1:>10} {2:>11} {3:>11} {4:>10} {5:>10}"
     header = hdrfmt.format(
-        "PID", "Timestamp", "Elapsed", "Memory", "Delta", "\u03A3 Delta"
+        "PID", "Status", "Elapsed", "Memory", "Delta", "\u03A3 Delta"
     )
-    writeline(log_file, header)
+    writer = csv.writer(log_file)
+    if not is_stream_std(log_file):
+        writeline(sys.stderr, header)
+        write_csv_row(writer, ["PID", "Status", "Timestamp", "Memory"])
+    else:
+        writeline(log_file, header)
 
     processes = sorted(set(pid))
 
-    states = [WatchedProcess(p) for p in processes]
+    states = [WatchedProcess.create(p) for p in processes]
 
     def writerow(
         state: WatchedProcess,
@@ -84,32 +127,33 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
         current_time: float,
         delta: float,
     ):
-        _fmtparts = row.split()
+        _fmtparts = deque(row.split())
         fmtparts = list()
         while _fmtparts:
-            part = _fmtparts.pop(0)
+            part = _fmtparts.popleft()
             if part.count("{") and part.count("}"):
                 fmtparts.append(part)
                 continue
             if part.count("{") and not part.count("}"):
-                rpart = _fmtparts.pop(0)
+                rpart = _fmtparts.popleft()
                 fmtparts.append(" ".join([part, rpart]))
 
         values = [
             state.pid,
-            current_time,
+            state.process.status(),
             current_time - start_time,
-            state.last,
+            state.mem.last,
             delta,
-            state.total,
+            state.mem.total,
         ]
+
         colors = [
             "cyan",
             "white",
             "white",
             "blue",
             ("red" if delta > 0 else "green"),
-            ("red" if state.total > 0 else "green"),
+            ("red" if state.mem.total > 0 else "green"),
         ]
         if len(values) != len(fmtparts) != len(colors):
             return
@@ -119,34 +163,59 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
             pad = [None for _ in range(i)] + [value]
             fmtval = click.style(fmt.format(*pad), fg=col)
             line.append(fmtval)
-        writeline(log_file, " ".join(line))
+        # If the log file is not stdout or stderr
+        if log_file.fileno() not in STD_FD:
+            writeline(sys.stderr, " ".join(line))
+            write_csv_row(
+                writer,
+                [
+                    str(state.pid),
+                    str(state.process.status()),
+                    str(current_time),
+                    str(state.mem.last),
+                ],
+            )
+        else:
+            writeline(log_file, " ".join(line))
 
     def sample(state: WatchedProcess, start_time: float):
-        mem, ts = mp.memory_usage(proc=state.pid, timestamps=True)[0]
-        delta = 0 if state.first else mem - state.last
-        if state.first:
-            state.first = False
-
-        state.total += delta
-        state.last = mem
         current_time = time.time()
+        try:
+            info = state.process.memory_info()
+        except ps.NoSuchProcess:
+            return False
+
+        mem = info.rss / 1000
+        delta = 0 if state.mem.first else mem - state.mem.last
+        if state.mem.first:
+            state.mem.first = False
+
+        state.mem.total += delta
+        state.mem.last = mem
 
         writerow(state, start_time, current_time, delta)
+        return True
 
     start = time.time()
     while True:
         try:
+            end = False
             for state in states:
-                sample(state, start)
-        except (KeyboardInterrupt, click.Abort):
+                if not sample(state, start):
+                    end = True
+                    break
+            if end:
+                break
+        except (KeyboardInterrupt, ps.NoSuchProcess):
             click.secho("\nBreaking", err=True, fg="red")
-            end = time.time()
-            summarize(end - start, states)
         else:
             elapsed = time.time() - start
             if elapsed >= duration:
                 break
             time.sleep(interval)
+
+    end = time.time()
+    summarize(end - start, states)
 
 
 if __name__ == "__main__":

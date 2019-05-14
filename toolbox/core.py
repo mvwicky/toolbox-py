@@ -1,8 +1,9 @@
-"""Miscellaneous Utilitles"""
+"""Miscellaneous Utilities."""
 import os
 import random
 import string
 import time
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Text, Union
 
@@ -70,9 +71,61 @@ def download(url: Text, path: PathType, session: ReqSession) -> int:
 def good_request(res: requests.Response) -> bool:
     return (
         (res.status_code == requests.codes.ok)
-        and ("content-length" in res.headers)
-        and (res.headers["content-length"])
+        and ("content-length" in res.headers)  # noqa: W503
+        and (res.headers["content-length"])  # noqa: W503
     )
+
+
+def dirshort(obj: Any, exclude="__") -> List[Text]:
+    return [e for e in dir(obj) if not e.startswith(exclude)]
+
+
+TimeableFunction = Optional[Callable[..., Any]]
+TimedFunction = Callable[..., Any]
+
+
+def time_call(func: TimeableFunction = None) -> TimedFunction:
+    if func is None:
+
+        def decorator(func):
+            return time_call(func)
+
+        return decorator
+
+    fp = FunctionTimer(func)
+
+    @wraps(func)
+    def new_fn(*args, **kwargs):
+        return fp(*args, **kwargs)
+
+    return new_fn
+
+
+class FunctionTimer(object):
+    timer = time.perf_counter
+
+    def __init__(self, func):
+        self.func = func
+
+    def __call__(self, *args, **kwargs):
+        func = self.func
+
+        timer = self.timer
+        start = timer()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            elapsed = timer() - start
+            func_name = func.__name__
+            file_name = func.__code__.co_filename
+            line_no = func.__code__.co_firstlineno
+            print(
+                f"{func_name} ({file_name}:{line_no}): {elapsed:.3f} seconds",
+                func_name,
+                file_name,
+                line_no,
+                elapsed,
+            )
 
 
 if __name__ == "__main__":
