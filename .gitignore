@@ -1,4 +1,7 @@
 
+.anaconda
+pip-wheel-metadata/
+
 *.sublime-workspace
 
 # Byte-compiled / optimized / DLL files

@@ -8,6 +8,7 @@ from numbers import Real
 from typing import TextIO, Text, Tuple, List
 
 import click
+import humanize
 import psutil as ps
 
 
@@ -18,16 +19,25 @@ def is_stream_std(stream: TextIO):
     return stream.fileno() in STD_FD
 
 
+def get_proc_mem(proc: ps.Process):
+    try:
+        return proc.memory_info()
+    except ps.NoSuchProcess:
+        return None
+
+
 @dataclass
 class WatchedResource:
     first: bool = True
     total: float = 0
     last: float = 0
+    delta: float = 0
 
 
 @dataclass
 class WatchedProcess:
     process: ps.Process
+    start_time: float
     mem: WatchedResource = WatchedResource()
 
     @property
@@ -36,7 +46,34 @@ class WatchedProcess:
 
     @classmethod
     def create(cls, pid):
-        return cls(ps.Process(pid))
+        return cls(ps.Process(pid), time.time())
+
+    def read_mem(self, include_children: bool = True):
+        try:
+            info = self.process.memory_info()
+        except ps.NoSuchProcess:
+            return False
+
+        mem_raw = info.rss
+        if include_children:
+            for child in self.process.children(True):
+                mem = get_proc_mem(child)
+                if mem is not None:
+                    mem_raw += mem.rss
+
+        mem = mem_raw / 1000
+        delta = 0 if self.mem.first else mem - self.mem.last
+        if self.mem.first:
+            self.mem.first = False
+        self.mem.delta = delta
+        self.mem.total += delta
+        self.mem.last = mem
+
+        return mem
+
+    @property
+    def num_children(self):
+        return len(self.process.children(recursive=True))
 
 
 def writeline(stream: TextIO, msg: Text, *, flush: bool = True):
@@ -48,10 +85,13 @@ def write_csv_row(writer: csv.writer, parts):
 
 
 def summarize(elapsed: Real, states: List[WatchedProcess]):
+    elapsed_str = humanize.naturaldelta(elapsed)
     for state in states:
         m = state.mem.total / elapsed
+        last_usage = humanize.naturalsize(state.mem.last * 1000)
         click.echo(f"PID:                 {state.pid}", err=True)
-        click.echo(f"Elapsed:             {elapsed:.4f}", err=True)
+        click.echo(f"Elapsed:             {elapsed_str}", err=True)
+        click.echo(f"Final Usage:         {last_usage}", err=True)
         click.echo(f"Total Memory Growth: {state.mem.total:.4f}", err=True)
         click.echo(f"Average Rate:        {m:.4f}", err=True)
 
@@ -85,13 +125,24 @@ def watch_options(f):
         default=math.inf,
         help="How long to run, in seconds. (defaults to indefinite)",
     )(f)
+    click.option(
+        "--include-children/--no-include-children",
+        default=True,
+        help="Include descendant processes in memory count",
+    )(f)
     return f
 
 
 @click.command()
 @click.argument("pid", type=int, nargs=-1, callback=validate_pids)
 @watch_options
-def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
+def main(
+    pid: Tuple[int],
+    log_file: TextIO,
+    interval: float,
+    duration: float,
+    include_children: bool,
+):
     """Check the memory usage of processes."""
     parts = [
         "{{0:>{0}}}",
@@ -100,15 +151,21 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
         "{{3:> {3}.2f}}",
         "{{4:> {4}.2f}}",
         "{{5:> {5}.2f}}",
+        "{{6:> {6}d}}",
     ]
-    widths = [6, 10, 10, 10, 10, 10]
+    widths = [6, 10, 10, 10, 10, 10, 8]
     fmt = " ".join(parts)
     row = fmt.format(*widths)
-    # row = "{0:>6} {1:>13.2f} {2:>10.1f}s {3:> 8.2f} {4:> 8.2f} {5:> 8.2f}"
 
-    hdrfmt = "{0:>6} {1:>10} {2:>11} {3:>11} {4:>10} {5:>10}"
+    hdrfmt = "{0:>6} {1:>10} {2:>11} {3:>10} {4:>10} {5:>10} {6:>8}"
     header = hdrfmt.format(
-        "PID", "Status", "Elapsed", "Memory", "Delta", "\u03A3 Delta"
+        "PID",
+        "Status",
+        "Elapsed",
+        "Memory",
+        "Delta",
+        "\u03A3 Delta",
+        "Children",
     )
     writer = csv.writer(log_file)
     if not is_stream_std(log_file):
@@ -138,6 +195,8 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
                 rpart = _fmtparts.popleft()
                 fmtparts.append(" ".join([part, rpart]))
 
+        num_children = 0 if not include_children else state.num_children
+
         values = [
             state.pid,
             state.process.status(),
@@ -145,6 +204,7 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
             state.mem.last,
             delta,
             state.mem.total,
+            num_children,
         ]
 
         colors = [
@@ -154,6 +214,7 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
             "blue",
             ("red" if delta > 0 else "green"),
             ("red" if state.mem.total > 0 else "green"),
+            "white",
         ]
         if len(values) != len(fmtparts) != len(colors):
             return
@@ -179,26 +240,18 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
             writeline(log_file, " ".join(line))
 
     def sample(state: WatchedProcess, start_time: float):
+
         current_time = time.time()
-        try:
-            info = state.process.memory_info()
-        except ps.NoSuchProcess:
+        reading = state.read_mem(include_children=include_children)
+        if reading is None:
             return False
 
-        mem = info.rss / 1000
-        delta = 0 if state.mem.first else mem - state.mem.last
-        if state.mem.first:
-            state.mem.first = False
-
-        state.mem.total += delta
-        state.mem.last = mem
-
-        writerow(state, start_time, current_time, delta)
+        writerow(state, start_time, current_time, state.mem.delta)
         return True
 
     start = time.time()
-    while True:
-        try:
+    try:
+        while True:
             end = False
             for state in states:
                 if not sample(state, start):
@@ -206,13 +259,16 @@ def main(pid: Tuple[int], log_file: TextIO, interval: float, duration: float):
                     break
             if end:
                 break
-        except (KeyboardInterrupt, ps.NoSuchProcess):
-            click.secho("\nBreaking", err=True, fg="red")
-        else:
+
             elapsed = time.time() - start
             if elapsed >= duration:
-                break
+                end = time.time()
+                summarize(end - start, states)
+                return
             time.sleep(interval)
+
+    except (KeyboardInterrupt, ps.NoSuchProcess, click.Abort):
+        click.secho("\nBreaking", err=True, fg="red")
 
     end = time.time()
     summarize(end - start, states)
